@@ -97,12 +97,18 @@ public class NewsService {
      */
     private void saveToCache(List<NewsFeedItem> newsItems, String category) {
         try {
+            int savedCount = 0;
             for (NewsFeedItem item : newsItems) {
+                // 跳过没有 URL 的新闻（无法去重）
+                if (!StringUtils.hasText(item.getLink())) {
+                    continue;
+                }
+                
                 // 检查是否已存在（根据 URL 去重）
                 NewsBackup existing = newsBackupRepository.findByUrl(item.getLink());
                 if (existing == null) {
                     NewsBackup backup = NewsBackup.builder()
-                            .title(item.getAuthor().getName())
+                            .title(item.getAuthor() != null ? item.getAuthor().getName() : "未知来源")
                             .summary(item.getTag())
                             .content(item.getContent())
                             .source(item.getSource())
@@ -111,9 +117,10 @@ public class NewsService {
                             .publishedAt(parsePublishedAt(item.getCreatedAt()))
                             .build();
                     newsBackupRepository.save(backup);
+                    savedCount++;
                 }
             }
-            log.info("已缓存 {} 条新闻到数据库", newsItems.size());
+            log.info("已缓存 {} 条新闻到数据库", savedCount);
         } catch (Exception ex) {
             log.error("保存新闻缓存失败: {}", ex.getMessage());
         }
@@ -178,9 +185,15 @@ public class NewsService {
             return java.time.LocalDateTime.now();
         }
         try {
-            // 解析格式: "MM-dd HH:mm"
-            return java.time.LocalDateTime.now(); // 简化实现
+            // 尝试解析格式: "MM-dd HH:mm"
+            String currentYear = String.valueOf(java.time.Year.now().getValue());
+            String fullDateString = currentYear + "-" + createdAt.trim();
+            java.time.format.DateTimeFormatter formatter = 
+                java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+            return java.time.LocalDateTime.parse(fullDateString, formatter);
         } catch (Exception ex) {
+            // 解析失败则返回当前时间
+            log.debug("解析时间失败: {}, 使用当前时间", createdAt);
             return java.time.LocalDateTime.now();
         }
     }
