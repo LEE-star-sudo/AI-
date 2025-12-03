@@ -1,2 +1,4 @@
 application.properties
 application-local.properties
+target/
+*.class
