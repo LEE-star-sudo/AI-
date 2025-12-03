@@ -39,14 +39,40 @@ public class NewsService {
 
     private final WebClient.Builder webClientBuilder;
     private final NewsProperties properties;
+    private final NewsBackupRepository newsBackupRepository;
 
+    /**
+     * 获取最新新闻 - 优先从远程 API，失败时从数据库缓存读取
+     */
     public List<NewsFeedItem> fetchLatest(String channel) {
-        if (!properties.isConfigured()) {
-            log.warn("新闻 API Key 未配置，返回空列表");
-            return Collections.emptyList();
+        try {
+            // 第一步：尝试从远程 API 获取新闻
+            List<NewsFeedItem> freshNews = fetchFromRemoteApi(channel);
+            
+            if (!freshNews.isEmpty()) {
+                // 成功获取到新闻，保存到数据库作为缓存
+                saveToCache(freshNews, channel);
+                log.info("成功从远程 API 获取 {} 条新闻", freshNews.size());
+                return freshNews;
+            }
+        } catch (Exception ex) {
+            // 远程 API 失败，记录日志
+            log.warn("远程新闻 API 失败，切换到数据库缓存: {}", ex.getMessage());
         }
 
-        try {
+        // 第二步：从数据库缓存读取
+        return fetchFromCache();
+    }
+
+    /**
+     * 从远程 API 获取新闻
+     */
+    private List<NewsFeedItem> fetchFromRemoteApi(String channel) {
+        if (!properties.isConfigured()) {
+            log.warn("新闻 API Key 未配置");
+            throw new RuntimeException("API Key not configured");
+        }
+
             String category = CATEGORY_MAP.getOrDefault(channel, "general");
                 MediastackResponse response = webClientBuilder
                     .baseUrl(properties.getBaseUrl())
@@ -58,16 +84,112 @@ public class NewsService {
                     .block();
 
                 if (response == null || response.getData() == null) {
-                return Collections.emptyList();
-            }
+            throw new RuntimeException("Empty response from API");
+        }
 
                 return response.getData().stream()
                     .map(article -> mapToFeedItem(article, channel))
                     .collect(Collectors.toList());
+    }
+
+    /**
+     * 保存新闻到数据库缓存
+     */
+    private void saveToCache(List<NewsFeedItem> newsItems, String category) {
+        try {
+            for (NewsFeedItem item : newsItems) {
+                // 检查是否已存在（根据 URL 去重）
+                NewsBackup existing = newsBackupRepository.findByUrl(item.getLink());
+                if (existing == null) {
+                    NewsBackup backup = NewsBackup.builder()
+                            .title(item.getAuthor().getName())
+                            .summary(item.getTag())
+                            .content(item.getContent())
+                            .source(item.getSource())
+                            .url(item.getLink())
+                            .category(category)
+                            .publishedAt(parsePublishedAt(item.getCreatedAt()))
+                            .build();
+                    newsBackupRepository.save(backup);
+                }
+            }
+            log.info("已缓存 {} 条新闻到数据库", newsItems.size());
         } catch (Exception ex) {
-            log.error("拉取新闻失败: {}", ex.getMessage());
+            log.error("保存新闻缓存失败: {}", ex.getMessage());
+        }
+    }
+
+    /**
+     * 从数据库缓存读取新闻
+     */
+    private List<NewsFeedItem> fetchFromCache() {
+        try {
+            List<NewsBackup> cachedNews = newsBackupRepository.findTop20ByOrderByPublishedAtDesc();
+            if (cachedNews.isEmpty()) {
+                log.warn("数据库缓存为空，返回空列表");
+                return Collections.emptyList();
+            }
+
+            log.info("从数据库缓存读取 {} 条新闻", cachedNews.size());
+            return cachedNews.stream()
+                    .map(this::convertToFeedItem)
+                    .collect(Collectors.toList());
+        } catch (Exception ex) {
+            log.error("读取缓存失败: {}", ex.getMessage());
             return Collections.emptyList();
         }
+    }
+
+    /**
+     * 将数据库实体转换为前端 DTO
+     */
+    private NewsFeedItem convertToFeedItem(NewsBackup backup) {
+        String id = backup.getUrl() != null ? Integer.toHexString(backup.getUrl().hashCode()) : String.valueOf(backup.getId());
+
+        FeedAuthor author = FeedAuthor.builder()
+                .name(backup.getSource() != null ? backup.getSource() : "实时热搜")
+                .handle("@" + (backup.getSource() != null ? backup.getSource().replaceAll("\\s+", "") : "news"))
+                .avatar("https://i.pravatar.cc/120?img=" + Math.abs(id.hashCode()) % 70)
+                .verified(true)
+                .badge("资讯")
+                .build();
+
+        FeedStats stats = FeedStats.builder()
+                .reposts(ThreadLocalRandom.current().nextInt(20, 120))
+                .comments(ThreadLocalRandom.current().nextInt(40, 260))
+                .likes(ThreadLocalRandom.current().nextInt(200, 1800))
+                .build();
+
+        return NewsFeedItem.builder()
+                .id(id)
+                .tag(backup.getSummary() != null ? backup.getSummary() : "#新闻#")
+                .author(author)
+                .content(backup.getContent() != null ? backup.getContent() : backup.getTitle())
+                .media(null)
+                .stats(stats)
+                .createdAt(formatLocalDateTime(backup.getPublishedAt()))
+                .source(backup.getSource())
+                .link(backup.getUrl())
+                .build();
+    }
+
+    private java.time.LocalDateTime parsePublishedAt(String createdAt) {
+        if (!StringUtils.hasText(createdAt)) {
+            return java.time.LocalDateTime.now();
+        }
+        try {
+            // 解析格式: "MM-dd HH:mm"
+            return java.time.LocalDateTime.now(); // 简化实现
+        } catch (Exception ex) {
+            return java.time.LocalDateTime.now();
+        }
+    }
+
+    private String formatLocalDateTime(java.time.LocalDateTime dateTime) {
+        if (dateTime == null) {
+            return "刚刚";
+        }
+        return dateTime.atZone(CHINA_ZONE).format(TIME_FMT);
     }
 
             private java.net.URI buildNewsUri(UriBuilder uriBuilder, String category) {
